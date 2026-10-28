@@ -1,0 +1,13 @@
+# acestream-launcher: Sicherheits-Config
+# Kopie nach ~/.config/acestream-launcher/config (install.sh --with-launcher macht das und ersetzt YOUR_USER).
+# Der Launcher darf NIE selbst eine Engine starten (sie liefe als normaler Desktop-User, ohne VPN-Routing/Killswitch).
+# Die Engine kommt ausschliesslich aus /usr/local/bin/acestream-start (eigener User, tun-Interface, nft-Killswitch).
+# engine-guard.sh gibt nur eine Meldung aus und bricht den Launcher ab, wenn 127.0.0.1:6878 nicht antwortet.
+# Hinweis: Der Launcher expandiert "~" nicht, darum absolute Pfade. YOUR_USER durch den eigenen Benutzernamen ersetzen
+# bzw. durch den Home-Pfad. Der Launcher teilt Kommandos per str.split() (kein shlex) -> keine Quotes/Leerzeichen in Pfaden.
+[tty]
+engine = /home/YOUR_USER/.config/acestream-launcher/engine-guard.sh
+player = /home/YOUR_USER/.config/acestream-launcher/player-ace.sh
+[browser]
+engine = /home/YOUR_USER/.config/acestream-launcher/engine-guard.sh
+player = /home/YOUR_USER/.config/acestream-launcher/player-ace.sh

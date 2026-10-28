@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Manuelles Abspielen eines AceStream-Streams (Player: mpv (Standard) oder VLC, siehe player-ace.sh / ACE_PLAYER) (nur gegen eine bereits laufende Engine).
+# Aufruf:  ace-play <40-stelliger-Content-ID | acestream://<ID>>
+# Startet NIE selbst eine Engine. Engine zuerst mit 'acestream-start' starten.
+set -u
+here="$(dirname "$(readlink -f "$0")")"
+host=127.0.0.1
+port=6878
+
+if [ $# -ne 1 ]; then
+  echo "Aufruf: ace-play <Content-ID | acestream://ID>" >&2
+  exit 2
+fi
+
+arg="${1,,}"
+arg="${arg#acestream://}"
+arg="${arg%%[/?#]*}"
+if ! [[ "$arg" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "FEHLER: '$1' ist keine gueltige 40-stellige Hex-Content-ID (bzw. acestream://-Link)." >&2
+  exit 2
+fi
+id="$arg"
+
+# Engine-Check (gleicher Endpunkt wie python-acestream: Server.getversion())
+if ! curl -fsS --max-time 3 "http://$host:$port/webui/api/service?method=get_version&format=json" 2>/dev/null | grep -q '"version"'; then
+  msg="AceStream-Engine laeuft nicht ($host:$port). Erst 'acestream-start' ausfuehren (Terminal offen lassen), dann ace-play erneut starten."
+  echo "FEHLER: $msg" >&2
+  notify-send -u critical -a AceStream "AceStream: Engine fehlt" "$msg" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+url="http://$host:$port/ace/getstream?id=$id&pid=$(uuidgen)"
+echo "Starte Player: $url"
+exec "$here/player-ace.sh" "$url"

@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# acestream-start: startet die AceStream-Engine ausschliesslich als eigener System-User, geroutet ueber das
+# VPN-Interface (tun*), mit nftables-Killswitch (ausgehend) und Eingangssperre fuer die Engine-Ports.
+# Installation (als root): sudo install -m 755 -o root -g root scripts/acestream-start /usr/local/bin/
+# Voraussetzungen: System-User "acestreamvpn" (siehe docs/SETUP.md), sudo, nftables, iproute2, curl,
+# ein OpenVPN-Tunnel (tun*). Dieses Beispiel nutzt Private Internet Access (piactl) nur fuer die
+# Verbindungsabfrage in Schritt 1; mit einem anderen VPN diesen Block (und PIA_VPNIP unten) anpassen.
+# Es gibt keinen Rollback: bricht das Skript ab, bleiben die Regeln bestehen (fail-closed).
+set -euo pipefail
+
+ACE_USER="acestreamvpn"
+ACE_UID="$(id -u "$ACE_USER")"
+TABLE_ID="100"
+
+echo "[1/7] Prüfe PIA-Verbindung..."
+
+if ! command -v piactl >/dev/null 2>&1; then
+  echo "FEHLER: piactl nicht gefunden. Ist PIA installiert?"
+  exit 1
+fi
+
+PIA_STATE="$(piactl get connectionstate 2>/dev/null || true)"
+
+if [[ "$PIA_STATE" != "Connected" ]]; then
+  echo "FEHLER: PIA ist nicht verbunden."
+  echo "Aktueller Status: $PIA_STATE"
+  echo "Bitte erst PIA verbinden."
+  exit 1
+fi
+
+VPN_IF="$(ip -o link show | awk -F': ' '/tun[0-9]+/ {print $2; exit}')"
+
+if [[ -z "${VPN_IF:-}" ]]; then
+  echo "FEHLER: Kein tun-Interface gefunden."
+  exit 1
+fi
+
+VPN_CIDR="$(ip -4 addr show dev "$VPN_IF" | awk '/inet / {print $2; exit}')"
+VPN_NET="$(ip route | awk -v dev="$VPN_IF" '$0 ~ "dev "dev && /scope link/ {print $1; exit}')"
+VPN_GW="$(ip route | awk -v dev="$VPN_IF" '$1=="default" && $0 ~ "dev "dev {print $3; exit}')"
+
+if [[ -z "${VPN_CIDR:-}" || -z "${VPN_NET:-}" || -z "${VPN_GW:-}" ]]; then
+  echo "FEHLER: Konnte VPN-IP/Netz/Gateway nicht ermitteln."
+  echo "VPN_IF=$VPN_IF"
+  echo "VPN_CIDR=$VPN_CIDR"
+  echo "VPN_NET=$VPN_NET"
+  echo "VPN_GW=$VPN_GW"
+  exit 1
+fi
+
+echo "VPN-Interface: $VPN_IF"
+echo "VPN-IP intern: $VPN_CIDR"
+echo "VPN-Netz: $VPN_NET"
+echo "VPN-Gateway: $VPN_GW"
+
+echo "[2/7] Stoppe alte AceStream-Prozesse..."
+
+sudo pkill -9 -u "$ACE_USER" 2>/dev/null || true
+pkill -f acestreamengine 2>/dev/null || true
+sleep 1
+
+echo "[3/7] Setze Routing für $ACE_USER ausschließlich über $VPN_IF..."
+
+sudo ip route flush table "$TABLE_ID" 2>/dev/null || true
+sudo ip route add "$VPN_NET" dev "$VPN_IF" table "$TABLE_ID"
+sudo ip route add default via "$VPN_GW" dev "$VPN_IF" table "$TABLE_ID"
+
+while sudo ip rule delete uidrange "$ACE_UID-$ACE_UID" table "$TABLE_ID" 2>/dev/null; do
+  true
+done
+
+sudo ip rule add uidrange "$ACE_UID-$ACE_UID" table "$TABLE_ID" priority 1000
+
+echo "[4/7] Setze harte ausgehende Killswitch-Regel..."
+
+sudo nft delete table inet acestream_killswitch 2>/dev/null || true
+
+sudo nft -f - <<EOF
+table inet acestream_killswitch {
+  chain output {
+    type filter hook output priority -100; policy accept;
+
+    meta skuid $ACE_UID oifname "lo" accept
+    meta skuid $ACE_UID oifname "$VPN_IF" accept
+    meta skuid $ACE_UID drop
+  }
+}
+EOF
+
+echo "[5/7] Setze eingehende Sperre für AceStream-Ports..."
+
+sudo nft delete table inet acestream_input_lock 2>/dev/null || true
+
+sudo nft -f - <<EOF
+table inet acestream_input_lock {
+  chain input {
+    type filter hook input priority -90; policy accept;
+
+    tcp dport { 6878, 62062, 8621 } ip saddr 127.0.0.1 accept
+    tcp dport { 6878, 62062, 8621 } ip6 saddr ::1 accept
+    tcp dport { 6878, 62062, 8621 } drop
+
+    # UDP: Antworten auf ausgehende Verbindungen der Engine bleiben erlaubt
+    udp dport { 6878, 62062, 8621 } ip saddr 127.0.0.1 accept
+    udp dport { 6878, 62062, 8621 } ip6 saddr ::1 accept
+    udp dport { 6878, 62062, 8621 } ct state established,related accept
+    udp dport { 6878, 62062, 8621 } drop
+  }
+}
+EOF
+
+echo "[6/7] Prüfe öffentliche IP vom AceStream-User..."
+
+# Holt die öffentliche IPv4 über zwei unabhängige Dienste (Fallback).
+# Aufruf: fetch_ip <Timeout> [Präfix-Kommando ...]
+# Gibt nur eine gültige IPv4 aus, sonst nichts.
+fetch_ip() {
+  local timeout="$1" url ip
+  shift
+  for url in https://ifconfig.me https://api.ipify.org; do
+    ip="$("$@" curl -4 -s -f --max-time "$timeout" "$url" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+      echo "$ip"
+      return 0
+    fi
+  done
+  return 0
+}
+
+ACE_IP="$(fetch_ip 10 sudo -u "$ACE_USER" -H)"
+
+if [[ -z "$ACE_IP" ]]; then
+  echo "FEHLER: AceStream-User bekommt keine öffentliche IP."
+  echo "Das ist meist ein Routing/VPN-Problem."
+  exit 1
+fi
+
+echo "AceStream-User öffentliche IP: $ACE_IP"
+
+# Heim-IP zur Laufzeit ermitteln (nicht hart kodiert): gleicher Abruf ohne VPN-Bindung.
+# Normale Prozesse (Desktop-User/root) gehen ohne Policy-Routing ueber die normale Leitung.
+HOME_IP="$(fetch_ip 5)"
+
+if [[ -z "$HOME_IP" ]]; then
+  echo "WARNUNG: Heim-IP konnte nicht ermittelt werden. Leak-Vergleich übersprungen."
+elif [[ "$HOME_IP" == "$ACE_IP" ]]; then
+  echo "FEHLER: Leak: Engine-Verkehr verlässt das Haus ohne VPN."
+  echo "AceStream-IP und Heim-IP sind identisch: $ACE_IP"
+  echo "(Falls PIA auf 'gesamten Verkehr über VPN' steht, ist die Heim-IP selbst die VPN-IP.)"
+  exit 1
+else
+  echo "Heim-IP (ohne VPN): $HOME_IP"
+  echo "OK: AceStream-IP weicht von der Heim-IP ab."
+fi
+
+# Die VPN-IP laut PIA ist nicht immer die Exit-IP, daher nur Warnung.
+PIA_VPNIP="$(piactl get vpnip 2>/dev/null || true)"
+
+if [[ -n "$PIA_VPNIP" && "$PIA_VPNIP" != "Unknown" && "$PIA_VPNIP" != "$ACE_IP" ]]; then
+  echo "WARNUNG: PIA meldet VPN-IP $PIA_VPNIP, AceStream-User hat aber $ACE_IP."
+  echo "Das kann normal sein (Exit-IP kann von der PIA-Server-IP abweichen)."
+fi
+
+echo "[7/7] Starte AceStream sicher als $ACE_USER..."
+
+echo
+echo "WICHTIG:"
+echo "Dieses Terminal offen lassen."
+echo "Danach im Browser ganz normal AceStream-Links öffnen."
+echo
+
+exec sudo -u "$ACE_USER" -H /usr/bin/acestreamengine --client-console

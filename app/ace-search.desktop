@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=AceStream Suche
+GenericName=AceStream Suche und Favoriten
+Comment=Kompakte Suche, Favoriten und Engine-Status für die lokale AceStream-Engine
+# @APP_DIR@ wird von install.sh durch den echten Installationspfad ersetzt.
+Exec=/usr/bin/python3 @APP_DIR@/ace_search.py
+Icon=system-search
+Terminal=false
+Categories=AudioVideo;Video;
+StartupWMClass=local.AceSearch
+Keywords=AceStream;Suche;Stream;

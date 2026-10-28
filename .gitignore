@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.bak*
+*.orig
+*.log
+favorites.json
+history.json
+settings.json
+oer-cache.json
+player.choice
+staging/

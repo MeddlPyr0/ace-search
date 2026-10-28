@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# acestream-stop: beendet Launcher, mpv und die Engine (User "acestreamvpn").
+# Entfernt KEINE nft-Tabellen, Routen oder Rules: der Schutz bleibt bestehen.
+# Achtung: "pkill -f mpv" trifft jedes laufende mpv, nicht nur das fuer AceStream.
+# Installation (als root): sudo install -m 755 -o root -g root scripts/acestream-stop /usr/local/bin/
+
+echo "Stoppe AceStream Launcher..."
+pkill -f acestream-launcher 2>/dev/null || true
+
+echo "Stoppe mpv..."
+pkill -f mpv 2>/dev/null || true
+
+echo "Stoppe AceStream Engine..."
+sudo pkill -9 -u acestreamvpn 2>/dev/null || true
+pkill -f acestreamengine 2>/dev/null || true
+
+echo "Fertig."
